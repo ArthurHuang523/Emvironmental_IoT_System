@@ -1,1 +1,1 @@
-# Emvironmental_IoT_System
+# Environmental_IoT_System
