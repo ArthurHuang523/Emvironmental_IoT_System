@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Firmware Update Manager</title>
+    <script src="https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            text-align: center;
+            max-width: 500px;
+            width: 100%;
+        }
+
+        .title {
+            font-size: 2.5em;
+            color: #333;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+
+        .status {
+            padding: 20px 30px;
+            border-radius: 50px;
+            font-weight: bold;
+            color: white;
+            margin-bottom: 30px;
+            display: inline-block;
+            animation: pulse 2s infinite;
+            font-size: 1.2em;
+            width: 100%;
+            max-width: 200px;
+        }
+
+        .connected { background: #4CAF50; }
+        .disconnected { background: #f44336; }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+
+        .update-btn {
+            background: linear-gradient(135deg, #ff9800 0%, #f57c00 100%);
+            color: white;
+            border: none;
+            padding: 20px 30px;
+            border-radius: 50px;
+            font-size: 1.2em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 5px 15px rgba(255, 152, 0, 0.3);
+            width: 100%;
+            max-width: 200px;
+            margin: 10px;
+        }
+
+        .button-container {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .update-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 25px rgba(255, 152, 0, 0.4);
+        }
+
+        .update-btn:active {
+            transform: translateY(0);
+        }
+
+        .footer {
+            margin-top: 30px;
+            color: #999;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="title">Update Manager</h1>
+        
+        <div id="status" class="status disconnected">Disconnected</div>
+        
+        <div class="button-container">
+            <button class="update-btn" onclick="publishOTAAvailable()">
+                Firmware Update
+            </button>
+        </div>
+        
+        <div class="footer">
+            Connected to: 192.168.137.34:9001<br>
+            Topic: ota/status
+        </div>
+    </div>
+
+    <script>
+        // MQTT client
+        let client = null;
+
+        // Connect to MQTT
+        function connectMQTT() {
+            const clientId = 'ota_admin_' + Math.random().toString(16).substr(2, 8);
+            const host = '192.168.137.34';
+            const port = 9001;
+            
+            let connectUrl = `ws://${host}:${port}/mqtt`;
+            
+            client = mqtt.connect(connectUrl, {
+                clientId: clientId,
+                clean: true,
+                connectTimeout: 4000,
+                reconnectPeriod: 1000,
+            });
+
+            client.on('connect', function () {
+                document.getElementById('status').textContent = 'Connected';
+                document.getElementById('status').className = 'status connected';
+            });
+
+            client.on('error', function (error) {
+                document.getElementById('status').textContent = 'Connection Failed';
+                document.getElementById('status').className = 'status disconnected';
+                showNotification('MQTT connection failed', 'error');
+            });
+
+            client.on('close', function () {
+                document.getElementById('status').textContent = 'Disconnected';
+                document.getElementById('status').className = 'status disconnected';
+            });
+        }
+
+        // Publish OTA update notification
+        function publishOTAAvailable() {
+            if (client && client.connected) {
+                client.publish('ota/status', '1');
+                showNotification('Firmware update notification published to all devices!', 'success');
+            } else {
+                showNotification('MQTT not connected, unable to send notification', 'error');
+            }
+        }
+
+        // Show notification
+        function showNotification(message, type) {
+            const notification = document.createElement('div');
+            const bgColor = type === 'success' ? '#4CAF50' : '#f44336';
+            
+            notification.style.cssText = `
+                position: fixed;
+                top: 30px;
+                left: 50%;
+                transform: translateX(-50%);
+                background: ${bgColor};
+                color: white;
+                padding: 20px 30px;
+                border-radius: 10px;
+                z-index: 1000;
+                font-weight: bold;
+                font-size: 1.1em;
+                box-shadow: 0 5px 20px rgba(0,0,0,0.3);
+                animation: slideDown 0.3s ease;
+            `;
+            
+            // Add animation styles
+            const style = document.createElement('style');
+            style.textContent = `
+                @keyframes slideDown {
+                    from { transform: translateX(-50%) translateY(-100%); opacity: 0; }
+                    to { transform: translateX(-50%) translateY(0); opacity: 1; }
+                }
+            `;
+            document.head.appendChild(style);
+            
+            notification.textContent = message;
+            document.body.appendChild(notification);
+
+            setTimeout(() => {
+                if (document.body.contains(notification)) {
+                    notification.style.animation = 'slideDown 0.3s ease reverse';
+                    setTimeout(() => {
+                        if (document.body.contains(notification)) {
+                            document.body.removeChild(notification);
+                        }
+                    }, 300);
+                }
+            }, 3000);
+        }
+
+        // Auto-connect when page loads
+        window.onload = function() {
+            connectMQTT();
+        };
+
+        // Disconnect when page closes
+        window.onbeforeunload = function() {
+            if (client) {
+                client.end();
+            }
+        };
+    </script>
+</body>
+</html>
