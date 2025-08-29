@@ -1,0 +1,40 @@
+#include "main.h"
+#include "tasks.h"
+#include "hardware.h"
+#include <string.h>
+
+void StartDefaultTask(void const * argument)
+{
+    uint32_t last_feed = 0;
+    uint32_t feed_count = 0;
+    
+    osDelay(10000);
+    
+    if(Watchdog_Init(30000) != HAL_OK) {
+        while(1) osDelay(1000);
+    }
+    
+    Watchdog_Feed();
+    last_feed = HAL_GetTick();
+    feed_count = 1;
+    
+    for(;;)
+    {
+        uint32_t now = HAL_GetTick();
+        
+        Watchdog_Task_Heartbeat(TASK_ID_DEFAULT);
+        
+        uint8_t all_ok = Watchdog_Check_All_Tasks();
+        
+        if(all_ok) {
+            // feed dog every 10s 
+            if(now - last_feed >= 10000) {
+                feed_count++;
+                Watchdog_Feed();
+                last_feed = now;
+            }
+        }
+        
+        osDelay(2000);
+    }
+}

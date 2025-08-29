@@ -1,0 +1,187 @@
+#include "main.h"
+#include <string.h>
+#include <stdio.h>
+#include "hardware.h"
+
+// WiFi Configure
+#define WIFI_SSID       "HXH"
+#define WIFI_PASSWORD   "Hxh20010523"
+
+// MQTT Configure
+#define MQTT_SERVER     "192.168.137.34"
+#define MQTT_PORT       1883
+#define MQTT_CLIENT_ID  "STM32_Controller_001"
+#define MQTT_USERNAME   ""
+#define MQTT_PASSWORD   ""
+#define MQTT_PUB_TOPIC   "sensor/status"
+#define MQTT_SUB_TOPIC   "sensor/control"
+
+/* BUZZER Configure */
+#define BUZZER_Pin       GPIO_PIN_1
+#define BUZZER_GPIO_Port GPIOA
+
+/* Reconnect time configure */
+#define WIFI_RECONNECT_DELAY_MS    5000
+#define MQTT_RECONNECT_DELAY_MS    5000
+
+uint32_t last_wifi_reconnect = 0;
+uint32_t last_mqtt_reconnect = 0;
+
+/**
+ * \brief    BUZZER SET FUNCTION
+ */
+void Buzzer_On(void)
+{
+    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+}
+
+void Buzzer_Off(void)
+{
+    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
+}
+
+/**
+ * \brief    BUZZER BEEP FUNCTION
+ */
+void Buzzer_Beep(uint16_t duration_ms)
+{
+    Buzzer_On();
+    HAL_Delay(duration_ms);
+    Buzzer_Off();
+}
+
+/**
+ * \brief   Extract Control value from MQTT Info
+ */
+int extract_control_value(const char* buffer)
+{
+    // mqtt post format: +MQTTSUBRECV:0,"sensor/control",1,0 or 1
+    char* mqttrecv_pos = strstr(buffer, "+MQTTSUBRECV:");
+    if (mqttrecv_pos == NULL) {
+        return -1;
+    }
+
+    // find last comma
+    char* last_comma = strrchr(mqttrecv_pos, ',');
+    if (last_comma == NULL) {
+        return -1;
+    }
+
+    // read control value
+    char* value_str = last_comma + 1;
+
+    // extract command
+    if (*value_str == '0') {
+        return 0;
+    } else if (*value_str == '1') {
+        return 1;
+    }
+
+    return -1; 
+}
+
+/**
+ * \brief    MQTT Info Check
+ */
+void check_mqtt_messages(void)
+{
+    char* buffer = ESP8266_GetBuffer();
+
+    // Check if there is data in the buffer
+    if (buffer == NULL || strlen(buffer) == 0) {
+        return;
+    }
+
+    // Check if MQTT subscription messages are received
+    if (strstr(buffer, "+MQTTSUBRECV:") != NULL) {
+        // Check if MQTT topic "sensor/control" messages are received
+        if (strstr(buffer, "sensor/control") != NULL) {
+            int control_value = extract_control_value(buffer);
+            // execute command
+            if (control_value == 0) {
+                Buzzer_Off();
+                ESP8266_PublishMQTT(MQTT_PUB_TOPIC, "received", 0, 0);
+            }
+            else if (control_value == 1) {
+                Buzzer_On();
+                ESP8266_PublishMQTT(MQTT_PUB_TOPIC, "received", 0, 0);
+            }
+        }
+        // clean esp8266 buffer
+        ESP8266_ClearBuffer();
+    }
+    else {
+        // Clean buffer if non-MQTT data exceeds threshold to prevent accumulation
+        if (strlen(buffer) > 100) {
+            ESP8266_ClearBuffer();
+        }
+    }
+}
+
+int main(void)
+{
+    // Hardware Init
+    HAL_Init();
+    SystemClock_Config();
+    Hardware_Init();
+
+    //ESP8266 Init
+    if (ESP8266_Init() != ESP8266_OK) {
+        while (1);
+    }
+
+    //ESP8266 Connect WiFi
+    if (ESP8266_ConnectWiFi(WIFI_SSID, WIFI_PASSWORD) == ESP8266_OK) {
+        Buzzer_Beep(300);
+    }
+
+    while (1)
+    {
+        uint32_t now = HAL_GetTick();
+
+        // WiFi state detect and reconnect 
+        if (ESP8266_GetWiFiStatus() != WIFI_CONNECTED)
+        {
+            if (now - last_wifi_reconnect > WIFI_RECONNECT_DELAY_MS)
+            {
+                if (ESP8266_ConnectWiFi(WIFI_SSID, WIFI_PASSWORD) == ESP8266_OK)
+                {
+                    Buzzer_Beep(200);  
+                }
+                last_wifi_reconnect = now;
+            }
+        }
+        else
+        {
+            // MQTT state detect and reconnect 
+            if (ESP8266_GetMQTTStatus() != MQTT_CONNECTED)
+            {
+                if (now - last_mqtt_reconnect > MQTT_RECONNECT_DELAY_MS)
+                {
+                    if (ESP8266_ConnectMQTT(MQTT_SERVER, MQTT_PORT, MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD) == ESP8266_OK)
+                    {
+                        ESP8266_SubscribeMQTT(MQTT_SUB_TOPIC, 0);
+                        Buzzer_Beep(200);
+                    }
+                    last_mqtt_reconnect = now;
+                }
+            }
+            else
+            {
+                // wait for control command
+                check_mqtt_messages();
+							            // every 15s publish online status
+            static uint32_t last_publish = 0;
+            if (now - last_publish > 15000)
+            {
+                ESP8266_PublishMQTT(MQTT_PUB_TOPIC, "Status:Online_Device:STM32_Controller_001", 0, 0);
+                last_publish = now;
+            }
+            }
+
+
+        }
+
+        HAL_Delay(50);
+    }
+}

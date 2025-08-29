@@ -1,0 +1,445 @@
+#include "main.h"
+#include "hardware.h"
+#include "string.h"
+#include "stdio.h"
+
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+
+// ESP8266 defination
+#define ESP8266_UART            huart2
+#define ESP8266_BUFFER_SIZE     512
+
+// global variable
+static char esp8266_buffer[ESP8266_BUFFER_SIZE];
+static WiFi_Status_t wifi_status = WIFI_DISCONNECTED;
+static MQTT_Status_t mqtt_status = MQTT_DISCONNECTED;
+
+/**
+  * @brief USART1 Initialization Function
+  */
+void MX_USART1_UART_Init(void)
+{
+    huart1.Instance = USART1;
+    huart1.Init.BaudRate = 115200;
+    huart1.Init.WordLength = UART_WORDLENGTH_8B;
+    huart1.Init.StopBits = UART_STOPBITS_1;
+    huart1.Init.Parity = UART_PARITY_NONE;
+    huart1.Init.Mode = UART_MODE_TX_RX;
+    huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+    HAL_UART_Init(&huart1);
+}
+
+/**
+  * @brief USART2 Initialization Function (ESP8266)
+  */
+void MX_USART2_UART_Init(void)
+{
+    huart2.Instance = USART2;
+    huart2.Init.BaudRate = 115200;
+    huart2.Init.WordLength = UART_WORDLENGTH_8B;
+    huart2.Init.StopBits = UART_STOPBITS_1;
+    huart2.Init.Parity = UART_PARITY_NONE;
+    huart2.Init.Mode = UART_MODE_TX_RX;
+    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+    HAL_UART_Init(&huart2);
+}
+
+/**
+  * @brief ESP8266 hardware reset
+  */
+void ESP8266_Reset(void)
+{
+    HAL_GPIO_WritePin(ESP8266_RST_GPIO_Port, ESP8266_RST_Pin, GPIO_PIN_RESET);
+    HAL_Delay(500);
+    HAL_GPIO_WritePin(ESP8266_RST_GPIO_Port, ESP8266_RST_Pin, GPIO_PIN_SET);
+    HAL_Delay(3000);  // wait for start
+    // clear buffer
+    uint8_t dummy;
+    while(HAL_UART_Receive(&huart2, &dummy, 1, 10) == HAL_OK);
+}
+
+/**
+  * @brief send AT command
+  */
+void ESP8266_SendCommand(char* command)
+{
+    char cmd[256];
+    sprintf(cmd, "%s\r\n", command);
+    HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), 1000);
+}
+
+/**
+  * @brief Receive ESP8266 Response
+  */
+ESP8266_Status_t ESP8266_ReceiveResponse(uint32_t timeout)
+{
+    uint32_t start_time = HAL_GetTick();
+    uint16_t index = 0;
+    
+    memset(esp8266_buffer, 0, ESP8266_BUFFER_SIZE);
+    
+    while ((HAL_GetTick() - start_time) < timeout)
+    {
+        uint8_t byte;
+        if (HAL_UART_Receive(&huart2, &byte, 1, 10) == HAL_OK)
+        {
+            if (index < ESP8266_BUFFER_SIZE - 1)
+            {
+                esp8266_buffer[index++] = byte;
+                esp8266_buffer[index] = '\0';
+                
+                // check OK response
+                if (strstr(esp8266_buffer, "OK") != NULL)
+                {
+                    return ESP8266_OK;
+                }
+                
+                // check ERROR response
+                if (strstr(esp8266_buffer, "ERROR") != NULL || 
+                    strstr(esp8266_buffer, "FAIL") != NULL)
+                {
+                    return ESP8266_ERROR;
+                }
+                
+                // WiFi Connect response
+                if (strstr(esp8266_buffer, "WIFI CONNECTED") != NULL ||
+                    strstr(esp8266_buffer, "WIFI GOT IP") != NULL)
+                {
+                    return ESP8266_OK;
+                }
+            }
+        }
+    }
+    
+    return ESP8266_TIMEOUT_ERROR;
+}
+
+/**
+  * @brief send AT command and wait for response
+  */
+ESP8266_Status_t ESP8266_SendCommandWithResponse(char* command, uint32_t timeout)
+{
+    ESP8266_SendCommand(command);
+    return ESP8266_ReceiveResponse(timeout);
+}
+
+/**
+  * @brief ESP8266 init
+  */
+ESP8266_Status_t ESP8266_Init(void)
+{
+    // hardware reset
+    ESP8266_Reset();
+    
+    // test connection
+    for(int i = 0; i < 3; i++)
+    {
+        if (ESP8266_SendCommandWithResponse("AT", 2000) == ESP8266_OK)
+        {
+            break;
+        }
+        if(i == 2) return ESP8266_ERROR;
+        HAL_Delay(1000);
+    }
+    
+    // Disable display back
+    ESP8266_SendCommandWithResponse("ATE0", 2000);
+    
+    // set Station mode
+    if (ESP8266_SendCommandWithResponse("AT+CWMODE=1", 3000) != ESP8266_OK)
+    {
+        return ESP8266_ERROR;
+    }
+    
+    return ESP8266_OK;
+}
+
+/**
+  * @brief connect WiFi
+  */
+ESP8266_Status_t ESP8266_ConnectWiFi(char* ssid, char* password)
+{
+    char command[128];
+    
+    wifi_status = WIFI_CONNECTING;
+    
+    // clear connection
+    ESP8266_SendCommandWithResponse("AT+CWQAP", 3000);
+    HAL_Delay(1000);
+    
+    // connect wifi
+    sprintf(command, "AT+CWJAP=\"%s\",\"%s\"", ssid, password);
+    
+    if (ESP8266_SendCommandWithResponse(command, 20000) == ESP8266_OK)
+    {
+        wifi_status = WIFI_CONNECTED;
+        return ESP8266_OK;
+    }
+    else
+    {
+        wifi_status = WIFI_DISCONNECTED;
+        return ESP8266_ERROR;
+    }
+}
+
+/**
+  * @brief disconncet WiFi
+  */
+ESP8266_Status_t ESP8266_DisconnectWiFi(void)
+{
+    wifi_status = WIFI_DISCONNECTED;
+    return ESP8266_SendCommandWithResponse("AT+CWQAP", 3000);
+}
+
+/**
+  * @brief check WiFi state
+  */
+WiFi_Status_t ESP8266_GetWiFiStatus(void)
+{
+    if (ESP8266_SendCommandWithResponse("AT+CWJAP?", 2000) == ESP8266_OK)
+    {
+        if (strstr(esp8266_buffer, "No AP") == NULL && 
+            strstr(esp8266_buffer, "+CWJAP:") != NULL)
+        {
+            wifi_status = WIFI_CONNECTED;
+        }
+        else
+        {
+            wifi_status = WIFI_DISCONNECTED;
+        }
+    }
+    else
+    {
+        wifi_status = WIFI_DISCONNECTED;
+    }
+    
+    return wifi_status;
+}
+
+/**
+  * @brief acquire WiFi infformation
+  */
+ESP8266_Status_t ESP8266_GetWiFiInfo(char* ssid_buffer, char* ip_buffer)
+{
+    // get SSID
+    if (ESP8266_SendCommandWithResponse("AT+CWJAP?", 2000) == ESP8266_OK)
+    {
+        char* ssid_start = strstr(esp8266_buffer, "+CWJAP:\"");
+        if (ssid_start != NULL && ssid_buffer != NULL)
+        {
+            ssid_start += 8;
+            char* ssid_end = strstr(ssid_start, "\"");
+            if (ssid_end != NULL)
+            {
+                int len = ssid_end - ssid_start;
+                strncpy(ssid_buffer, ssid_start, len);
+                ssid_buffer[len] = '\0';
+            }
+        }
+    }
+    
+    // get IP address
+    if (ESP8266_SendCommandWithResponse("AT+CIFSR", 2000) == ESP8266_OK)
+    {
+        char* ip_start = strstr(esp8266_buffer, "STAIP,\"");
+        if (ip_start != NULL && ip_buffer != NULL)
+        {
+            ip_start += 7;
+            char* ip_end = strstr(ip_start, "\"");
+            if (ip_end != NULL)
+            {
+                int len = ip_end - ip_start;
+                strncpy(ip_buffer, ip_start, len);
+                ip_buffer[len] = '\0';
+            }
+        }
+        return ESP8266_OK;
+    }
+    
+    return ESP8266_ERROR;
+}
+
+/**
+  * @brief scan WiFi list
+  */
+ESP8266_Status_t ESP8266_ScanWiFi(void)
+{
+    return ESP8266_SendCommandWithResponse("AT+CWLAP", 10000);
+}
+
+/**
+  * @brief connect MQTT server
+  */
+ESP8266_Status_t ESP8266_ConnectMQTT(char* server, uint16_t port, char* client_id, char* username, char* password)
+{
+    char command[256];
+    
+    mqtt_status = MQTT_CONNECTING;
+    
+    // set MQTT user configureation
+    sprintf(command, "AT+MQTTUSERCFG=0,1,\"%s\",\"%s\",\"%s\",0,0,\"\"", 
+            client_id, username, password);
+    if (ESP8266_SendCommandWithResponse(command, 3000) != ESP8266_OK)
+    {
+        mqtt_status = MQTT_DISCONNECTED;
+        return ESP8266_ERROR;
+    }
+    
+    // connect MQTT server
+    sprintf(command, "AT+MQTTCONN=0,\"%s\",%d,1", server, port);
+    if (ESP8266_SendCommandWithResponse(command, 15000) == ESP8266_OK)
+    {
+        mqtt_status = MQTT_CONNECTED;
+        return ESP8266_OK;
+    }
+    else
+    {
+        mqtt_status = MQTT_DISCONNECTED;
+        return ESP8266_ERROR;
+    }
+}
+
+/**
+  * @brief publish MQTT info 
+  */
+ESP8266_Status_t ESP8266_PublishMQTT(char* topic, char* message, uint8_t qos, uint8_t retain)
+{
+    char command[512];
+    
+    if (mqtt_status != MQTT_CONNECTED)
+    {
+        return ESP8266_ERROR;
+    }
+    
+    sprintf(command, "AT+MQTTPUB=0,\"%s\",\"%s\",%d,%d", topic, message, qos, retain);
+    return ESP8266_SendCommandWithResponse(command, 5000);
+}
+
+/**
+  * @brief subscribe MQTT topic
+  */
+ESP8266_Status_t ESP8266_SubscribeMQTT(char* topic, uint8_t qos)
+{
+    char command[256];
+    
+    if (mqtt_status != MQTT_CONNECTED)
+    {
+        return ESP8266_ERROR;
+    }
+    
+    sprintf(command, "AT+MQTTSUB=0,\"%s\",%d", topic, qos);
+    return ESP8266_SendCommandWithResponse(command, 5000);
+}
+
+/**
+  * @brief ubsubscribe MQTT topic
+  */
+ESP8266_Status_t ESP8266_UnsubscribeMQTT(char* topic)
+{
+    char command[256];
+    
+    if (mqtt_status != MQTT_CONNECTED)
+    {
+        return ESP8266_ERROR;
+    }
+    
+    sprintf(command, "AT+MQTTUNSUB=0,\"%s\"", topic);
+    return ESP8266_SendCommandWithResponse(command, 5000);
+}
+
+/**
+  * @brief disconncet MQTT connection
+  */
+ESP8266_Status_t ESP8266_DisconnectMQTT(void)
+{
+    mqtt_status = MQTT_DISCONNECTED;
+    return ESP8266_SendCommandWithResponse("AT+MQTTCLEAN=0", 3000);
+}
+
+/**
+  * @brief get MQTT connection state
+  */
+MQTT_Status_t ESP8266_GetMQTTStatus(void)
+{
+    return mqtt_status;
+}
+
+/**
+  * @brief chech receive MQTT info state
+  */
+ESP8266_Status_t ESP8266_ReceiveMQTT(char* topic_buffer, char* message_buffer)
+{
+    if (strstr(esp8266_buffer, "+MQTTSUBRECV:") != NULL)
+    {
+        char* msg_start = strstr(esp8266_buffer, "+MQTTSUBRECV:");
+        if (msg_start != NULL)
+        {
+            // Parsing topics and messages
+            char* topic_start = strstr(msg_start, ",\"");
+            if (topic_start != NULL)
+            {
+                topic_start += 2;
+                char* topic_end = strstr(topic_start, "\",\"");
+                if (topic_end != NULL)
+                {
+                    // copy topic
+                    int topic_len = topic_end - topic_start;
+                    if (topic_buffer != NULL)
+                    {
+                        strncpy(topic_buffer, topic_start, topic_len);
+                        topic_buffer[topic_len] = '\0';
+                    }
+                    
+                    // copy info
+                    char* message_start = topic_end + 3;
+                    char* message_end = strstr(message_start, "\"");
+                    if (message_end != NULL && message_buffer != NULL)
+                    {
+                        int message_len = message_end - message_start;
+                        strncpy(message_buffer, message_start, message_len);
+                        message_buffer[message_len] = '\0';
+                    }
+                    
+                    return ESP8266_OK;
+                }
+            }
+        }
+    }
+    
+    return ESP8266_ERROR;
+}
+
+/**
+  * @brief get buffer info
+  */
+char* ESP8266_GetBuffer(void)
+{
+    return esp8266_buffer;
+}
+
+/**
+  * @brief clear buffer
+  */
+void ESP8266_ClearBuffer(void)
+{
+    memset(esp8266_buffer, 0, ESP8266_BUFFER_SIZE);
+}
+
+/**
+  * @brief send data to MQTT 
+  */
+ESP8266_Status_t ESP8266_SendSensorData(float temperature, float humidity, 
+                                       float smoke_ppm, uint16_t air_quality_ppm, 
+                                       uint16_t light_lux, uint8_t device_alarm)
+{
+    char at_command[400]; 
+    
+    sprintf(at_command, 
+            "AT+MQTTPUB=0,\"sensor/data\",\"Temp:%.1f_Humidity:%.1f_SmokePPM:%.0f_AirPPM:%d_Lightlux:%d_Alarm:%d_Updatetime:%lu\",0,0", 
+            temperature, humidity, smoke_ppm, air_quality_ppm, light_lux, device_alarm, (unsigned long)(HAL_GetTick()/1000));
+    
+    return ESP8266_SendCommandWithResponse(at_command, 5000);
+}

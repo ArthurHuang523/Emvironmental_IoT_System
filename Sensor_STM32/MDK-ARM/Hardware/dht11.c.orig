@@ -1,0 +1,236 @@
+#include "main.h"
+#include "hardware.h"
+
+// DHT11 timing definitions (in microseconds)
+#define DHT11_START_SIGNAL_TIME     18000  // 18ms start signal
+#define DHT11_RESPONSE_WAIT_TIME    40     // Wait for response signal
+#define DHT11_DATA_BIT_TIME         70     // Data bit duration
+
+// DHT11 data structure
+typedef struct {
+    uint8_t humidity_int;       // Integer part of humidity
+    uint8_t humidity_dec;       // Decimal part of humidity
+    uint8_t temperature_int;    // Integer part of temperature
+    uint8_t temperature_dec;    // Decimal part of temperature
+    uint8_t checksum;           // Checksum
+} DHT11_Data_t;
+
+/**
+  * @brief Microsecond delay function
+  * @param us Delay time in microseconds
+  * @retval None
+  */
+static void DHT11_Delay_us(uint32_t us)
+{
+    uint32_t delay = us * (SystemCoreClock / 1000000) / 9;
+    while(delay--);
+}
+
+/**
+  * @brief Set DHT11 data pin as output
+  * @param None
+  * @retval None
+  */
+static void DHT11_Set_Output(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = DHT11_DATA_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(DHT11_DATA_GPIO_Port, &GPIO_InitStruct);
+}
+
+/**
+  * @brief Set DHT11 data pin as input
+  * @param None
+  * @retval None
+  */
+static void DHT11_Set_Input(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = DHT11_DATA_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(DHT11_DATA_GPIO_Port, &GPIO_InitStruct);
+}
+
+/**
+  * @brief Send start signal to DHT11
+  * @param None
+  * @retval None
+  */
+static void DHT11_Start_Signal(void)
+{
+    DHT11_Set_Output();
+    HAL_GPIO_WritePin(DHT11_DATA_GPIO_Port, DHT11_DATA_Pin, GPIO_PIN_RESET);
+    DHT11_Delay_us(DHT11_START_SIGNAL_TIME);  // Pull low for 18ms
+    HAL_GPIO_WritePin(DHT11_DATA_GPIO_Port, DHT11_DATA_Pin, GPIO_PIN_SET);
+    DHT11_Delay_us(30);  // Pull high for 30us
+    DHT11_Set_Input();
+}
+
+/**
+  * @brief Wait for DHT11 response
+  * @param None
+  * @retval uint8_t 1=Success, 0=Failure
+  */
+static uint8_t DHT11_Wait_Response(void)
+{
+    uint32_t timeout = 0;
+    
+    // Wait for low-level response
+    while(HAL_GPIO_ReadPin(DHT11_DATA_GPIO_Port, DHT11_DATA_Pin) == GPIO_PIN_SET)
+    {
+        DHT11_Delay_us(1);
+        timeout++;
+        if(timeout > 100) return 0;  // Timeout
+    }
+    
+    timeout = 0;
+    // Wait for high level
+    while(HAL_GPIO_ReadPin(DHT11_DATA_GPIO_Port, DHT11_DATA_Pin) == GPIO_PIN_RESET)
+    {
+        DHT11_Delay_us(1);
+        timeout++;
+        if(timeout > 100) return 0;  // Timeout
+    }
+    
+    timeout = 0;
+    // Wait for low level
+    while(HAL_GPIO_ReadPin(DHT11_DATA_GPIO_Port, DHT11_DATA_Pin) == GPIO_PIN_SET)
+    {
+        DHT11_Delay_us(1);
+        timeout++;
+        if(timeout > 100) return 0;  // Timeout
+    }
+    
+    return 1;  // Response successful
+}
+
+/**
+  * @brief Read one byte of data
+  * @param None
+  * @retval uint8_t Byte of data read
+  */
+static uint8_t DHT11_Read_Byte(void)
+{
+    uint8_t byte_data = 0;
+    uint32_t timeout = 0;
+    
+    for(int i = 7; i >= 0; i--)
+    {
+        timeout = 0;
+        // Wait for data bit start (low level)
+        while(HAL_GPIO_ReadPin(DHT11_DATA_GPIO_Port, DHT11_DATA_Pin) == GPIO_PIN_RESET)
+        {
+            DHT11_Delay_us(1);
+            timeout++;
+            if(timeout > 100) return 0;
+        }
+        
+        // Delay 40us then read the data bit
+        DHT11_Delay_us(40);
+        
+        if(HAL_GPIO_ReadPin(DHT11_DATA_GPIO_Port, DHT11_DATA_Pin) == GPIO_PIN_SET)
+        {
+            byte_data |= (1 << i);  // High level means 1
+        }
+        
+        timeout = 0;
+        // Wait for data bit end
+        while(HAL_GPIO_ReadPin(DHT11_DATA_GPIO_Port, DHT11_DATA_Pin) == GPIO_PIN_SET)
+        {
+            DHT11_Delay_us(1);
+            timeout++;
+            if(timeout > 100) return 0;
+        }
+    }
+    
+    return byte_data;
+}
+
+/**
+  * @brief Read temperature and humidity data from DHT11
+  * @param temperature Pointer to store temperature
+  * @param humidity Pointer to store humidity
+  * @retval uint8_t 1=Success, 0=Failure
+  */
+uint8_t DHT11_Read_Data(float *temperature, float *humidity)
+{
+    DHT11_Data_t dht_data;
+    uint8_t checksum;
+    
+    // Send start signal
+    DHT11_Start_Signal();
+    
+    // Wait for response
+    if(!DHT11_Wait_Response())
+    {
+        return 0;  // No response
+    }
+    
+    // Read 5 bytes of data
+    dht_data.humidity_int = DHT11_Read_Byte();
+    dht_data.humidity_dec = DHT11_Read_Byte();
+    dht_data.temperature_int = DHT11_Read_Byte();
+    dht_data.temperature_dec = DHT11_Read_Byte();
+    dht_data.checksum = DHT11_Read_Byte();
+    
+    // Verify checksum
+    checksum = dht_data.humidity_int + dht_data.humidity_dec + 
+               dht_data.temperature_int + dht_data.temperature_dec;
+    
+    if(checksum != dht_data.checksum)
+    {
+        return 0;  // Checksum failed
+    }
+    
+    // Convert data
+    *humidity = (float)dht_data.humidity_int + (float)dht_data.humidity_dec * 0.1f;
+    *temperature = (float)dht_data.temperature_int + (float)dht_data.temperature_dec * 0.1f;
+    
+    return 1;  // Read successful
+}
+
+/**
+  * @brief Read DHT11 temperature
+  * @param None
+  * @retval float Temperature value (°„C)
+  */
+float DHT11_Read_Temperature(void)
+{
+    float temperature, humidity;
+    if(DHT11_Read_Data(&temperature, &humidity))
+    {
+        return temperature;
+    }
+    return -999.0f;  // Error value
+}
+
+/**
+  * @brief Read DHT11 humidity
+  * @param None
+  * @retval float Humidity value (%RH)
+  */
+float DHT11_Read_Humidity(void)
+{
+    float temperature, humidity;
+    if(DHT11_Read_Data(&temperature, &humidity))
+    {
+        return humidity;
+    }
+    return -999.0f;  // Error value
+}
+
+/**
+  * @brief Check if DHT11 sensor is working
+  * @param None
+  * @retval uint8_t 1=OK, 0=Error
+  */
+uint8_t DHT11_Check_Sensor(void)
+{
+    float temperature, humidity;
+    return DHT11_Read_Data(&temperature, &humidity);
+}

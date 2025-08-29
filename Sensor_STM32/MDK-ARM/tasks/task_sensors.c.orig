@@ -1,0 +1,196 @@
+#include "main.h"
+#include "tasks.h"
+#include "hardware.h"
+
+uint8_t g_power_save_mode = 0;  // 0 = normal mode, 1 = power-saving mode
+
+// Global sensor data variables (existing ones unchanged)
+float g_temperature = 0.0f;
+float g_humidity = 0.0f;
+float g_smoke_voltage = 0.0f;
+uint32_t g_smoke_adc = 0;
+uint8_t g_smoke_alarm = 0;
+uint8_t g_dht11_ok = 0;
+float g_smoke_ppm = 0.0f;
+
+uint8_t g_wifi_connected = 0;
+uint8_t g_mqtt_connected = 0;
+
+// MQ-135 air quality sensor variables
+float g_air_quality_voltage = 0.0f;
+uint32_t g_air_quality_adc = 0;
+uint8_t g_air_quality_alarm = 0;
+uint16_t g_air_quality_ppm = 0;
+
+// photoresistor sensor variables
+float g_light_voltage = 0.0f;
+uint32_t g_light_adc = 0;
+uint8_t g_light_level = 0;
+uint16_t g_light_lux = 0;
+
+// Error counters
+uint8_t g_dht11_error_count = 0;
+uint8_t g_mq2_error_count = 0;
+uint8_t g_mq135_error_count = 0;
+uint8_t g_ldr_error_count = 0;
+
+void StartSensorTask(void const * argument)
+{
+    /* USER CODE BEGIN StartSensorTask */
+    
+    // Sensor warm-up time
+    osDelay(3000);
+    
+    /* Infinite loop */
+    for(;;)
+    {
+        // Temporary variables
+        float temp_temperature, temp_humidity;
+        float temp_smoke_voltage, temp_air_quality_voltage, temp_light_voltage;
+        uint32_t temp_smoke_adc, temp_air_quality_adc, temp_light_adc;
+        uint8_t temp_smoke_alarm, temp_air_quality_alarm, temp_light_level;
+        uint16_t temp_air_quality_ppm, temp_light_lux;
+        float temp_smoke_ppm;
+        uint8_t temp_dht11_ok;
+				Watchdog_Task_Heartbeat(TASK_ID_SENSOR);
+        // 1. Read DHT11 temperature and humidity data - with error handling
+        if(DHT11_Read_Data(&temp_temperature, &temp_humidity))
+        {
+            temp_dht11_ok = 1;
+            g_dht11_error_count = 0;  // reset error count
+            
+            // Data validity check
+            if(temp_temperature < -40 || temp_temperature > 80 || 
+               temp_humidity < 0 || temp_humidity > 100)
+            {
+                temp_dht11_ok = 0;  // data invalid
+                g_dht11_error_count++;
+            }
+        }
+        else
+        {
+            temp_dht11_ok = 0;
+            temp_temperature = 0.0f;
+            temp_humidity = 0.0f;
+            g_dht11_error_count++;
+            
+            // If failed 5 times consecutively report fault
+            if(g_dht11_error_count >= 5)
+            {
+                // Fault information could be sent to MQTT (at appropriate time)
+                // Or set a fault flag
+            }
+        }
+        
+        // 2. Read MQ-2 smoke sensor data - with error handling
+        temp_smoke_adc = MQ2_Read_Raw();
+        if(temp_smoke_adc <= 4095)  // ADC value validity check
+        {
+            temp_smoke_voltage = MQ2_Read_Average(3);
+            temp_smoke_alarm = MQ2_Smoke_Detect(2.0f);
+            temp_smoke_ppm = MQ2_Read_PPM();
+            g_mq2_error_count = 0;  // reset error count
+            
+            // Voltage validity check
+            if(temp_smoke_voltage < 0 || temp_smoke_voltage > 3.3)
+            {
+                g_mq2_error_count++;
+                temp_smoke_voltage = 0.0f;
+                temp_smoke_ppm = 0.0f;
+            }
+        }
+        else
+        {
+            g_mq2_error_count++;
+            temp_smoke_voltage = 0.0f;
+            temp_smoke_alarm = 0;
+            temp_smoke_ppm = 0.0f;
+        }
+        
+        // 3. Read MQ-135 air quality sensor data - with error handling
+        temp_air_quality_adc = MQ135_Read_Raw();
+        if(temp_air_quality_adc > 0 && temp_air_quality_adc < 4095)
+        {
+            temp_air_quality_voltage = MQ135_Read_Average(3);
+            temp_air_quality_alarm = MQ135_Air_Quality_Detect(2.5f);
+            temp_air_quality_ppm = MQ135_Calculate_PPM(temp_air_quality_voltage);
+            g_mq135_error_count = 0;
+            
+            // Voltage validity check
+            if(temp_air_quality_voltage < 0 || temp_air_quality_voltage > 3.3)
+            {
+                g_mq135_error_count++;
+                temp_air_quality_voltage = 0.0f;
+                temp_air_quality_ppm = 0;
+            }
+        }
+        else
+        {
+            g_mq135_error_count++;
+            temp_air_quality_voltage = 0.0f;
+            temp_air_quality_alarm = 0;
+            temp_air_quality_ppm = 0;
+        }
+        
+        // 4. Read photoresistor sensor data - with error handling
+        temp_light_adc = LDR_Read_Raw();
+        if(temp_light_adc <= 4095)  // ADC value validity check
+        {
+            temp_light_voltage = LDR_Read_Average(3);
+            temp_light_level = LDR_Get_Light_Level(temp_light_voltage);
+            temp_light_lux = LDR_Calculate_Lux(temp_light_voltage);
+            g_ldr_error_count = 0;
+            
+            // Voltage validity check
+            if(temp_light_voltage < 0 || temp_light_voltage > 3.3)
+            {
+                g_ldr_error_count++;
+                temp_light_voltage = 0.0f;
+                temp_light_lux = 0;
+            }
+        }
+        else
+        {
+            g_ldr_error_count++;
+            temp_light_voltage = 0.0f;
+            temp_light_level = 0;
+            temp_light_lux = 0;
+        }
+        
+        // Acquire mutex to update all global variables
+        if(osMutexWait(sensorDataMutexHandle, 100) == osOK)
+        {
+            // Existing sensor data
+            g_temperature = temp_temperature;
+            g_humidity = temp_humidity;
+            g_smoke_voltage = temp_smoke_voltage;
+            g_smoke_adc = temp_smoke_adc;
+            g_smoke_alarm = temp_smoke_alarm;
+            g_smoke_ppm = temp_smoke_ppm;
+            g_dht11_ok = temp_dht11_ok;
+            
+            // New sensor data
+            g_air_quality_voltage = temp_air_quality_voltage;
+            g_air_quality_adc = temp_air_quality_adc;
+            g_air_quality_alarm = temp_air_quality_alarm;
+            g_air_quality_ppm = temp_air_quality_ppm;
+            
+            g_light_voltage = temp_light_voltage;
+            g_light_adc = temp_light_adc;
+            g_light_level = temp_light_level;
+            g_light_lux = temp_light_lux;
+            
+            osMutexRelease(sensorDataMutexHandle);
+        }
+        
+        // power-saving mode judgment
+        uint8_t is_night = (g_light_lux < 100);
+        uint8_t has_alarm = g_smoke_alarm || g_air_quality_alarm;
+        g_power_save_mode = (is_night && !has_alarm) ? 1 : 0;
+        
+        // Adjust delay based on power mode
+        uint32_t delay_time = g_power_save_mode ? 10000 : 3000;
+        osDelay(delay_time);
+    }
+    /* USER CODE END StartSensorTask */
+}
